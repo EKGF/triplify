@@ -2,7 +2,7 @@
 title: "Planned features"
 description: "Features planned for triplify: more source formats, nested data, formula translation and typed value copies."
 permalink: /planned/
-nav_order: 6
+nav_order: 7
 grapharch:
   subject: urn:triplify:website:page:planned
 ---

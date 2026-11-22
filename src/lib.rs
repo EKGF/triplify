@@ -1,6 +1,7 @@
 //! Triplify: capture any tabular data as raw RDF first, map later.
 
 pub mod emit;
+pub mod encode;
 pub mod formula;
 pub mod git;
 pub mod iri;

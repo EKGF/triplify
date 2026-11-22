@@ -10,20 +10,108 @@ use {
         vocab::{raw, rdf, rdfs, xsd},
     },
     oxrdf::{
-        GraphName,
+        GraphNameRef,
         Literal,
         NamedNode,
         NamedNodeRef,
-        NamedOrBlankNode,
         Quad,
-        Term,
+        QuadRef,
+        TermRef,
     },
-    std::collections::BTreeMap,
-    tokio::sync::mpsc,
+    std::{collections::BTreeMap, sync::Arc},
 };
 
-pub type QuadBatch = Vec<Quad>;
-pub type QuadSender = mpsc::Sender<QuadBatch>;
+/// A shared IRI: cloning it is a reference-count bump, not an allocation.
+pub type Node = Arc<NamedNode>;
+
+/// The object of an emitted triple.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Object {
+    /// A vocabulary term; costs nothing to emit.
+    Static(NamedNodeRef<'static>),
+    Node(Node),
+    Literal(Literal),
+}
+
+impl Object {
+    fn as_ref(&self) -> TermRef<'_> {
+        match self {
+            Self::Static(n) => (*n).into(),
+            Self::Node(n) => n.as_ref().as_ref().into(),
+            Self::Literal(l) => l.as_ref().into(),
+        }
+    }
+}
+
+impl From<NamedNodeRef<'static>> for Object {
+    fn from(n: NamedNodeRef<'static>) -> Self { Self::Static(n) }
+}
+
+impl From<NamedNode> for Object {
+    fn from(n: NamedNode) -> Self { Self::Node(Arc::new(n)) }
+}
+
+impl From<Node> for Object {
+    fn from(n: Node) -> Self { Self::Node(n) }
+}
+
+impl From<&Node> for Object {
+    fn from(n: &Node) -> Self { Self::Node(Arc::clone(n)) }
+}
+
+impl From<Literal> for Object {
+    fn from(l: Literal) -> Self { Self::Literal(l) }
+}
+
+/// One emitted triple; its graph is the batch's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Triple {
+    pub subject:   Node,
+    pub predicate: NamedNodeRef<'static>,
+    pub object:    Object,
+}
+
+/// How a batch travels to the writer.
+#[derive(Debug)]
+pub enum QuadBatch {
+    /// Structured triples of one graph, for TriG and canonical output.
+    Triples { graph: Node, triples: Vec<Triple> },
+    /// N-Quads or N-Triples lines, already encoded by the producer so that
+    /// serialization runs in parallel across sources.
+    Encoded { bytes: Vec<u8>, quads: u64 },
+}
+
+impl QuadBatch {
+    pub fn quad_count(&self) -> u64 {
+        match self {
+            Self::Triples { triples, .. } => triples.len() as u64,
+            Self::Encoded { quads, .. } => *quads,
+        }
+    }
+
+    /// Owned quads of a structured batch (empty for encoded batches).
+    pub fn into_quads(self, keep_graph: bool) -> impl Iterator<Item = Quad> {
+        let (graph, triples) = match self {
+            Self::Triples { graph, triples } => (Some(graph), triples),
+            Self::Encoded { .. } => (None, Vec::new()),
+        };
+        triples.into_iter().map(move |t| {
+            let g = graph.as_deref().filter(|_| keep_graph);
+            quad_ref(&t, g).into_owned()
+        })
+    }
+}
+
+fn quad_ref<'a>(t: &'a Triple, graph: Option<&'a NamedNode>) -> QuadRef<'a> {
+    QuadRef::new(
+        t.subject.as_ref().as_ref(),
+        t.predicate,
+        t.object.as_ref(),
+        graph.map_or(GraphNameRef::DefaultGraph, |g| g.as_ref().into()),
+    )
+}
+
+pub type QuadSender = flume::Sender<QuadBatch>;
 
 const BATCH_SIZE: usize = 8 * 1024;
 
@@ -103,18 +191,18 @@ impl CellValue {
     }
 }
 
-/// Buffers quads for one named graph and ships them in batches.
+/// Buffers the triples of one named graph and ships them in batches.
 #[derive(Debug)]
 pub struct GraphEmitter {
-    graph:  GraphName,
-    buffer: QuadBatch,
+    graph:  Node,
+    buffer: Vec<Triple>,
     sender: QuadSender,
 }
 
 impl GraphEmitter {
     pub fn new(graph: NamedNode, sender: QuadSender) -> Self {
         Self {
-            graph: graph.into(),
+            graph: Arc::new(graph),
             buffer: Vec::with_capacity(BATCH_SIZE),
             sender,
         }
@@ -122,22 +210,23 @@ impl GraphEmitter {
 
     pub fn quad(
         &mut self,
-        s: impl Into<NamedOrBlankNode>,
-        p: NamedNodeRef<'_>,
-        o: impl Into<Term>,
+        s: impl Into<Node>,
+        p: NamedNodeRef<'static>,
+        o: impl Into<Object>,
     ) {
-        self.buffer.push(Quad::new(
-            s,
-            p.into_owned(),
-            o,
-            self.graph.clone(),
-        ));
+        self.buffer.push(Triple {
+            subject:   s.into(),
+            predicate: p,
+            object:    o.into(),
+        });
     }
 
     pub fn is_full(&self) -> bool { self.buffer.len() >= BATCH_SIZE }
 
     fn take(&mut self) -> QuadBatch {
-        std::mem::replace(&mut self.buffer, Vec::with_capacity(BATCH_SIZE))
+        let triples =
+            std::mem::replace(&mut self.buffer, Vec::with_capacity(BATCH_SIZE));
+        QuadBatch::Triples { graph: Arc::clone(&self.graph), triples }
     }
 
     /// Flush from a blocking (non-runtime) thread if the batch is full.
@@ -154,7 +243,7 @@ impl GraphEmitter {
             return Ok(());
         }
         let batch = self.take();
-        self.sender.blocking_send(batch).map_err(|_| WriterGone)
+        self.sender.send(batch).map_err(|_| WriterGone)
     }
 
     pub async fn flush_if_full(&mut self) -> Result<(), WriterGone> {
@@ -170,7 +259,7 @@ impl GraphEmitter {
             return Ok(());
         }
         let batch = self.take();
-        self.sender.send(batch).await.map_err(|_| WriterGone)
+        self.sender.send_async(batch).await.map_err(|_| WriterGone)
     }
 }
 
@@ -206,12 +295,12 @@ impl SourceEmitter {
         label: Option<&str>,
     ) -> ViewEmitter<'_> {
         let iris = self.iris.view(number);
-        let view = iris.view();
-        let source = self.iris.source();
+        let view: Node = Arc::new(iris.view());
+        let source: Node = Arc::new(self.iris.source());
         let out = &mut self.out;
-        out.quad(view.clone(), rdf::TYPE, raw::VIEW.into_owned());
-        out.quad(view.clone(), raw::IS_VIEW_IN, source.clone());
-        out.quad(source, raw::HAS_VIEW, view.clone());
+        out.quad(view.clone(), rdf::TYPE, raw::VIEW);
+        out.quad(view.clone(), raw::IS_VIEW_IN, &source);
+        out.quad(source, raw::HAS_VIEW, &view);
         out.quad(
             view.clone(),
             raw::VIEW_NUMBER,
@@ -219,13 +308,20 @@ impl SourceEmitter {
         );
         if let Some(label) = label {
             out.quad(
-                view,
+                view.clone(),
                 rdfs::LABEL,
                 Literal::new_simple_literal(label),
             );
         }
         let profiles = self.profile.then(BTreeMap::new);
-        ViewEmitter { iris, out, columns: 0, profiles }
+        ViewEmitter {
+            iris,
+            view,
+            out,
+            columns: Vec::new(),
+            row: None,
+            profiles,
+        }
     }
 }
 
@@ -233,22 +329,47 @@ impl SourceEmitter {
 #[derive(Debug)]
 pub struct ViewEmitter<'a> {
     iris:     ViewIris,
+    view:     Node,
     out:      &'a mut GraphEmitter,
-    columns:  u32,
+    /// Declared columns; index `c - 1` holds column `c`.
+    columns:  Vec<Node>,
+    /// The row currently being emitted.
+    row:      Option<(RowNumber, Node)>,
     profiles: Option<BTreeMap<u32, ColumnProfiler>>,
 }
 
 impl ViewEmitter<'_> {
     pub fn out(&mut self) -> &mut GraphEmitter { self.out }
 
+    fn column_count(&self) -> u32 { self.columns.len() as u32 }
+
+    /// The node of a declared column.
+    fn column_node(&self, column: ColumnNumber) -> Node {
+        Arc::clone(&self.columns[column.0 as usize - 1])
+    }
+
+    /// The node of `row`, minted once per row.
+    fn row_node(&mut self, row: RowNumber) -> Node {
+        match &self.row {
+            Some((r, node)) if *r == row => Arc::clone(node),
+            _ => {
+                let node: Node = Arc::new(self.iris.row(row));
+                self.row = Some((row, Arc::clone(&node)));
+                node
+            },
+        }
+    }
+
     /// Declare a column, optionally with its header text as `rdfs:label`.
+    /// Columns are declared in order, so `number` is the next one.
     pub fn column(&mut self, number: ColumnNumber, header: Option<&str>) {
-        let col = self.iris.column(number);
-        let view = self.iris.view();
+        debug_assert_eq!(number.0, self.column_count() + 1);
+        let col: Node = Arc::new(self.iris.column(number));
+        self.columns.push(Arc::clone(&col));
         let out = &mut *self.out;
-        out.quad(col.clone(), rdf::TYPE, raw::COLUMN.into_owned());
-        out.quad(col.clone(), raw::IS_COLUMN_IN_VIEW, view.clone());
-        out.quad(view, raw::HAS_COLUMN, col.clone());
+        out.quad(col.clone(), rdf::TYPE, raw::COLUMN);
+        out.quad(col.clone(), raw::IS_COLUMN_IN_VIEW, &self.view);
+        out.quad(self.view.clone(), raw::HAS_COLUMN, &col);
         out.quad(
             col.clone(),
             raw::COLUMN_NUMBER,
@@ -257,7 +378,6 @@ impl ViewEmitter<'_> {
         if let Some(h) = header.filter(|h| !h.is_empty()) {
             out.quad(col, rdfs::LABEL, Literal::new_simple_literal(h));
         }
-        self.columns = self.columns.max(number.0);
     }
 
     /// Attach a cell's formula (verbatim and R1C1) to its value.
@@ -268,7 +388,7 @@ impl ViewEmitter<'_> {
         formula: &crate::formula::Formula,
         r1c1: &crate::formula::R1C1,
     ) {
-        let value = self.iris.value(row, column);
+        let value: Node = Arc::new(self.iris.value(row, column));
         let out = &mut *self.out;
         out.quad(
             value.clone(),
@@ -288,7 +408,7 @@ impl ViewEmitter<'_> {
         column: ColumnNumber,
         r1c1: &crate::formula::R1C1,
     ) {
-        let col = self.iris.column(column);
+        let col = self.column_node(column);
         self.out.quad(
             col,
             raw::FORMULA_R1C1,
@@ -302,14 +422,14 @@ impl ViewEmitter<'_> {
         let Some(mut profiles) = self.profiles.take() else {
             return
         };
-        for c in 1..=self.columns {
+        for c in 1..=self.column_count() {
             let profile = profiles.remove(&c).unwrap_or_default().finish();
             self.emit_profile(ColumnNumber(c), profile);
         }
     }
 
     fn emit_profile(&mut self, column: ColumnNumber, p: ColumnProfile) {
-        let col = self.iris.column(column);
+        let col = self.column_node(column);
         let out = &mut *self.out;
         let int =
             |n: u64| Literal::new_typed_literal(n.to_string(), xsd::INTEGER);
@@ -323,11 +443,7 @@ impl ViewEmitter<'_> {
             out.quad(col.clone(), raw::FREQ, int(freq));
         }
         if let Some((datatype, n)) = p.datatype {
-            out.quad(
-                col.clone(),
-                raw::INFERRED_DATATYPE,
-                datatype.into_owned(),
-            );
+            out.quad(col.clone(), raw::INFERRED_DATATYPE, datatype);
             out.quad(col.clone(), raw::CONFORMING_COUNT, int(n));
         }
         if let Some((min, max)) = p.extremes {
@@ -348,10 +464,10 @@ impl ViewEmitter<'_> {
     }
 
     pub fn row(&mut self, number: RowNumber) {
-        let row = self.iris.row(number);
+        let row = self.row_node(number);
         let out = &mut *self.out;
-        out.quad(row.clone(), rdf::TYPE, raw::ROW.into_owned());
-        out.quad(row.clone(), raw::IS_ROW_IN_VIEW, self.iris.view());
+        out.quad(row.clone(), rdf::TYPE, raw::ROW);
+        out.quad(row.clone(), raw::IS_ROW_IN_VIEW, &self.view);
         out.quad(
             row,
             raw::VIEW_ROW_NUMBER,
@@ -367,24 +483,22 @@ impl ViewEmitter<'_> {
         column: ColumnNumber,
         cell: &CellValue,
     ) {
-        if column.0 > self.columns {
-            for c in self.columns + 1..=column.0 {
+        if column.0 > self.column_count() {
+            for c in self.column_count() + 1..=column.0 {
                 self.column(ColumnNumber(c), None);
             }
         }
-        let value = self.iris.value(row, column);
+        let value: Node = Arc::new(self.iris.value(row, column));
+        let row_node = self.row_node(row);
+        let column_node = self.column_node(column);
         let out = &mut *self.out;
         let class = match cell {
             CellValue::Null { .. } => raw::NULL_VALUE,
             _ => raw::VALUE,
         };
-        out.quad(value.clone(), rdf::TYPE, class.into_owned());
-        out.quad(value.clone(), raw::VALUE_OF, self.iris.row(row));
-        out.quad(
-            value.clone(),
-            raw::FOR_COLUMN,
-            self.iris.column(column),
-        );
+        out.quad(value.clone(), rdf::TYPE, class);
+        out.quad(value.clone(), raw::VALUE_OF, row_node);
+        out.quad(value.clone(), raw::FOR_COLUMN, column_node);
         let literal = cell.literal();
         if let Some(profiles) = &mut self.profiles {
             profiles
@@ -418,7 +532,7 @@ mod tests {
 
     #[test]
     fn null_cell_has_no_literal_but_keeps_text() {
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, rx) = flume::bounded(1);
         let iris = SourceIris::new(ContentDigest::new([1; 32]));
         let mut src = SourceEmitter::new(
             iris.clone(),
@@ -429,7 +543,8 @@ mod tests {
             source_text: Some("#N/A".into()),
         });
         src.out().flush_blocking().unwrap();
-        let quads = rx.try_recv().unwrap();
+        let quads: Vec<Quad> =
+            rx.try_recv().unwrap().into_quads(true).collect();
         assert!(quads.iter().any(|q| q.predicate == raw::SOURCE_TEXT));
         assert!(!quads.iter().any(|q| q.predicate == raw::LITERAL_VALUE));
         assert!(

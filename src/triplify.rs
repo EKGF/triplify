@@ -16,7 +16,6 @@ use {
         path::PathBuf,
         sync::{Arc, Mutex},
     },
-    tokio::sync::mpsc,
     tokio_stream::wrappers::ReceiverStream,
     tracing::{info, warn},
 };
@@ -60,8 +59,18 @@ impl Triplify {
     pub async fn run(self) -> anyhow::Result<Summary> {
         let started = chrono::Utc::now();
         let run = RunIri::new();
-        let (tx, rx) = mpsc::channel(self.concurrency * 4);
+        // producers -> [encoder pool] -> writer; bounded for backpressure.
+        let (to_writer, rx) = flume::bounded(self.concurrency * 4);
         let writer = tokio::spawn(self.output.clone().run(rx));
+        let (tx, encoders) = match self.output.encoding() {
+            Some(encoding) => {
+                let (tx, input) = flume::bounded(self.concurrency * 4);
+                let pool =
+                    encoding.spawn_pool(self.concurrency, input, to_writer);
+                (tx, pool)
+            },
+            None => (to_writer, Vec::new()),
+        };
 
         let seen = Arc::new(Mutex::new(HashSet::<ContentDigest>::new()));
         let candidates =
@@ -85,6 +94,20 @@ impl Triplify {
             }
         }
         self.describe_run(&run, started, &produced, tx).await?;
+        // All senders are gone now; the encoders drain and stop.
+        let panicked = tokio::task::spawn_blocking(move || {
+            encoders
+                .into_iter()
+                .map(std::thread::JoinHandle::join)
+                .filter(Result::is_err)
+                .count()
+        })
+        .await?;
+        // A lost batch must fail the run, not shorten the output silently.
+        anyhow::ensure!(
+            panicked == 0,
+            "{panicked} encoder thread(s) panicked"
+        );
         summary.quads = writer.await??;
         Ok(summary)
     }

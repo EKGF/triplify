@@ -6,21 +6,16 @@
 //! needs the whole dataset in memory, everything else streams.
 
 use {
-    crate::emit::QuadBatch,
+    crate::{emit::QuadBatch, encode::Encoding},
     anyhow::Context,
     async_compression::tokio::write::GzipEncoder,
     oxrdf::{
         Dataset,
-        GraphName,
-        Quad,
         graph::{CanonicalizationAlgorithm, CanonicalizationHashAlgorithm},
     },
     oxrdfio::{RdfFormat, RdfSerializer},
     std::{path::PathBuf, pin::Pin},
-    tokio::{
-        io::{AsyncWrite, AsyncWriteExt, BufWriter},
-        sync::mpsc,
-    },
+    tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter},
 };
 
 const PREFIXES: &[(&str, &str)] = &[
@@ -114,7 +109,13 @@ impl Output {
 
     async fn sink(&self) -> anyhow::Result<Sink> {
         let raw: Sink = match &self.target {
-            Target::Stdout => Box::pin(tokio::io::stdout()),
+            // Unbuffered stdout costs one write system call per quad.
+            Target::Stdout => {
+                Box::pin(BufWriter::with_capacity(
+                    1 << 20,
+                    tokio::io::stdout(),
+                ))
+            },
             Target::File(p) => {
                 Box::pin(BufWriter::with_capacity(
                     1 << 20,
@@ -131,19 +132,27 @@ impl Output {
         })
     }
 
-    fn adapt(&self, quad: Quad) -> Quad {
-        if self.syntax.keeps_graphs() {
-            quad
-        } else {
-            Quad { graph_name: GraphName::DefaultGraph, ..quad }
+    /// The encoding producers apply themselves: line-based syntaxes stream
+    /// pre-encoded bytes; TriG and canonical output need structured triples.
+    pub fn encoding(&self) -> Option<Encoding> {
+        match (self.syntax, self.canonical) {
+            (_, true) | (Syntax::TriG, _) => None,
+            (Syntax::NQuads, false) => Some(Encoding::NQuads),
+            (Syntax::NTriples, false) => Some(Encoding::NTriples),
         }
     }
 
     /// Consume all batches; returns the number of quads received.
     pub async fn run(
         self,
-        rx: mpsc::Receiver<QuadBatch>,
+        rx: flume::Receiver<QuadBatch>,
     ) -> anyhow::Result<u64> {
+        if self.gzip && self.encoding().is_some() {
+            return tokio::task::spawn_blocking(move || {
+                self.write_encoded_parallel_gzip(&rx)
+            })
+            .await?;
+        }
         let mut sink = self.sink().await?;
         let count = if self.canonical {
             self.write_canonical(&mut sink, rx).await?
@@ -157,7 +166,80 @@ impl Output {
     async fn write_streaming(
         &self,
         sink: &mut Sink,
-        mut rx: mpsc::Receiver<QuadBatch>,
+        rx: flume::Receiver<QuadBatch>,
+    ) -> anyhow::Result<u64> {
+        if self.encoding().is_some() {
+            Self::write_encoded(sink, rx).await
+        } else {
+            self.write_serialized(sink, rx).await
+        }
+    }
+
+    /// Line-based output: producers already encoded every batch, so the
+    /// writer only moves bytes.
+    async fn write_encoded(
+        sink: &mut Sink,
+        rx: flume::Receiver<QuadBatch>,
+    ) -> anyhow::Result<u64> {
+        let mut count = 0u64;
+        while let Ok(batch) = rx.recv_async().await {
+            let QuadBatch::Encoded { bytes, quads } = batch else {
+                anyhow::bail!("structured batch sent to a line-based writer");
+            };
+            sink.write_all(&bytes).await?;
+            count += quads;
+        }
+        Ok(count)
+    }
+
+    /// Gzipped line-based output, compressed on all cores into a single
+    /// standard gzip member (blocks share their predecessor's dictionary,
+    /// like pigz), so every gzip reader can decompress it.
+    fn write_encoded_parallel_gzip(
+        &self,
+        rx: &flume::Receiver<QuadBatch>,
+    ) -> anyhow::Result<u64> {
+        use {
+            gzp::{
+                ZWriter,
+                deflate::Gzip,
+                par::compress::{ParCompress, ParCompressBuilder},
+            },
+            std::io::Write as _,
+        };
+        let out: Box<dyn std::io::Write + Send> = match &self.target {
+            Target::Stdout => Box::new(std::io::stdout()),
+            Target::File(p) => {
+                Box::new(std::fs::File::create(p).with_context(|| {
+                    format!("cannot create {}", p.display())
+                })?)
+            },
+        };
+        let threads =
+            std::thread::available_parallelism().map_or(4, |n| n.get());
+        // Level 6, as gzip and the single-threaded encoder default to.
+        let mut gz: ParCompress<Gzip, _> = ParCompressBuilder::new()
+            .compression_level(gzp::Compression::new(6))
+            .num_threads(threads)
+            .map_err(|e| anyhow::anyhow!("gzip threads: {e}"))?
+            .from_writer(out);
+        let mut count = 0u64;
+        for batch in rx.iter() {
+            let QuadBatch::Encoded { bytes, quads } = batch else {
+                anyhow::bail!("structured batch sent to a line-based writer");
+            };
+            gz.write_all(&bytes)?;
+            count += quads;
+        }
+        gz.finish().map_err(|e| anyhow::anyhow!("gzip: {e}"))?;
+        Ok(count)
+    }
+
+    /// TriG: serialized here, where prefixes and graph blocks are known.
+    async fn write_serialized(
+        &self,
+        sink: &mut Sink,
+        rx: flume::Receiver<QuadBatch>,
     ) -> anyhow::Result<u64> {
         let mut ser = RdfSerializer::from_format(self.syntax.format());
         for (prefix, ns) in PREFIXES {
@@ -165,10 +247,15 @@ impl Output {
         }
         let mut ser = ser.for_tokio_async_writer(sink);
         let mut count = 0u64;
-        while let Some(batch) = rx.recv().await {
-            count += batch.len() as u64;
-            for quad in batch {
-                ser.serialize_quad(&self.adapt(quad)).await?;
+        let keep = self.syntax.keeps_graphs();
+        while let Ok(batch) = rx.recv_async().await {
+            anyhow::ensure!(
+                matches!(batch, QuadBatch::Triples { .. }),
+                "encoded batch sent to a serializing writer"
+            );
+            count += batch.quad_count();
+            for quad in batch.into_quads(keep) {
+                ser.serialize_quad(&quad).await?;
             }
         }
         ser.finish().await?;
@@ -178,14 +265,15 @@ impl Output {
     async fn write_canonical(
         &self,
         sink: &mut Sink,
-        mut rx: mpsc::Receiver<QuadBatch>,
+        rx: flume::Receiver<QuadBatch>,
     ) -> anyhow::Result<u64> {
         let mut dataset = Dataset::new();
         let mut count = 0u64;
-        while let Some(batch) = rx.recv().await {
-            count += batch.len() as u64;
-            for quad in batch {
-                dataset.insert(&self.adapt(quad));
+        let keep = self.syntax.keeps_graphs();
+        while let Ok(batch) = rx.recv_async().await {
+            count += batch.quad_count();
+            for quad in batch.into_quads(keep) {
+                dataset.insert(&quad);
             }
         }
         dataset.canonicalize(CanonicalizationAlgorithm::Rdfc10 {

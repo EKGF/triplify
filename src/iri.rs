@@ -38,13 +38,55 @@ use {
 
 /// Name-based UUIDv8 using SHA-256, per RFC 9562 Appendix B.2.
 pub fn uuid_v8_sha256(namespace: Uuid, name: &str) -> Uuid {
-    let digest = Sha256::new()
-        .chain_update(namespace.as_bytes())
-        .chain_update(name.as_bytes())
-        .finalize();
+    uuid_from(
+        Sha256::new()
+            .chain_update(namespace.as_bytes())
+            .chain_update(name.as_bytes()),
+    )
+}
+
+/// Finish a SHA-256 over `namespace ‖ name` into a UUIDv8.
+fn uuid_from(hasher: Sha256) -> Uuid {
+    let digest = hasher.finalize();
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     Uuid::new_v8(bytes)
+}
+
+/// A SHA-256 state that has already absorbed `NAMESPACE ‖ prefix`, so names
+/// sharing the prefix only hash their suffix.
+#[derive(Debug, Clone)]
+struct NamePrefix(Sha256);
+
+impl NamePrefix {
+    fn new(prefix: &str) -> Self {
+        Self(
+            Sha256::new()
+                .chain_update(NAMESPACE.as_bytes())
+                .chain_update(prefix.as_bytes()),
+        )
+    }
+
+    /// IRI of `prefix ‖ n` (decimal).
+    fn iri_with(&self, n: u64) -> NamedNode {
+        let mut digits = itoa::Buffer::new();
+        urn(uuid_from(
+            self.0.clone().chain_update(digits.format(n)),
+        ))
+    }
+
+    /// IRI of `prefix ‖ n ‖ middle ‖ m` (decimals).
+    fn iri_with2(&self, n: u64, middle: &str, m: u64) -> NamedNode {
+        let mut a = itoa::Buffer::new();
+        let mut b = itoa::Buffer::new();
+        urn(uuid_from(
+            self.0
+                .clone()
+                .chain_update(a.format(n))
+                .chain_update(middle)
+                .chain_update(b.format(m)),
+        ))
+    }
 }
 
 /// Triplify's UUID namespace.
@@ -69,7 +111,11 @@ impl ResourceName {
 }
 
 fn urn(uuid: Uuid) -> NamedNode {
-    NamedNode::new_unchecked(uuid.urn().to_string())
+    let mut buf = Uuid::encode_buffer();
+    let mut iri = String::with_capacity(45);
+    iri.push_str("urn:uuid:");
+    iri.push_str(uuid.hyphenated().encode_lower(&mut buf));
+    NamedNode::new_unchecked(iri)
 }
 
 /// SHA-256 of a source's bytes; the identity of a [`crate::source::Source`].
@@ -119,31 +165,41 @@ impl SourceIris {
     pub fn checksum(&self) -> NamedNode { self.name.child("checksum").iri() }
 
     pub fn view(&self, v: ViewNumber) -> ViewIris {
-        ViewIris { name: self.name.child("view").child(v.0) }
+        ViewIris::new(self.name.child("view").child(v.0))
     }
 }
 
-/// Mints the IRIs inside one view.
+/// Mints the IRIs inside one view. Row, column and value names share the
+/// view's prefix, which is hashed once.
 #[derive(Debug, Clone)]
 pub struct ViewIris {
-    name: ResourceName,
+    name:   ResourceName,
+    rows:   NamePrefix,
+    column: NamePrefix,
 }
 
 impl ViewIris {
+    fn new(name: ResourceName) -> Self {
+        let rows = NamePrefix::new(&format!("{}/row/", name.as_str()));
+        let column = NamePrefix::new(&format!("{}/column/", name.as_str()));
+        Self { name, rows, column }
+    }
+
     pub fn view(&self) -> NamedNode { self.name.iri() }
 
+    #[cfg(test)]
     fn row_name(&self, r: RowNumber) -> ResourceName {
         self.name.child("row").child(r.0)
     }
 
     pub fn column(&self, c: ColumnNumber) -> NamedNode {
-        self.name.child("column").child(c.0).iri()
+        self.column.iri_with(u64::from(c.0))
     }
 
-    pub fn row(&self, r: RowNumber) -> NamedNode { self.row_name(r).iri() }
+    pub fn row(&self, r: RowNumber) -> NamedNode { self.rows.iri_with(r.0) }
 
     pub fn value(&self, r: RowNumber, c: ColumnNumber) -> NamedNode {
-        self.row_name(r).child("column").child(c.0).iri()
+        self.rows.iri_with2(r.0, "/column/", u64::from(c.0))
     }
 }
 
@@ -202,6 +258,19 @@ mod tests {
             format!("source/{}/view/2/row/7/column/3", "ab".repeat(32))
         );
         assert_eq!(v.value(RowNumber(7), ColumnNumber(3)), name.iri());
+        // The prefix-hashed fast paths mint exactly the name-based IRIs.
+        assert_eq!(
+            v.row(RowNumber(7)),
+            v.row_name(RowNumber(7)).iri()
+        );
+        assert_eq!(
+            v.column(ColumnNumber(12)),
+            v.name.child("column").child(12).iri()
+        );
+        assert_eq!(
+            v.value(RowNumber(0), ColumnNumber(1)),
+            v.row_name(RowNumber(0)).child("column").child(1).iri()
+        );
         assert!(name.iri().as_str().starts_with("urn:uuid:"));
         assert_eq!(name.uuid().get_version_num(), 8);
     }

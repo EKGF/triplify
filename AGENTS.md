@@ -44,6 +44,10 @@ cargo test --lib
 cargo test --tests
 ```
 
+Performance: run `scripts/bench.sh 0.1` before and after changes to the
+emit, encode or writer path. Output must stay byte-identical: compare the
+sorted N-Quads of the old and new builds, excluding the run graph.
+
 SHACL conformance against the upstream ontology:
 
 ```sh

@@ -2,7 +2,7 @@
 title: "Contributing"
 description: "How triplify is built: its architecture, coding conventions, verification commands, commit conventions and release process."
 permalink: /contributing/
-nav_order: 6
+nav_order: 8
 grapharch:
   subject: urn:triplify:website:page:contributing
 ---
