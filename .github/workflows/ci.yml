@@ -67,7 +67,7 @@ jobs:
           "$bin/triplify" --version || exit $?
           "$bin/triplify" smoke.csv -o smoke.nq || exit $?
           grep -q '"00123"' smoke.nq || { printf 'smoke output lacks the CSV value\n' >&2; exit 1; }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target }}
           path: dist/*.whl
@@ -83,7 +83,7 @@ jobs:
           maturin-version: v1.15.0
           command: sdist
           args: --out dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
