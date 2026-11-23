@@ -48,7 +48,7 @@ async fn client() -> Client {
 const PEOPLE: &str = "id,name,code\n1,Alice,00123\n2,Bob,00456\n";
 const PLAIN: &str = "a,b\nx,1\ny,2\n";
 
-fn parquet_bytes() -> Vec<u8> {
+fn make_parquet() -> Vec<u8> {
     let batch = RecordBatch::try_from_iter([
         (
             "id",
@@ -69,13 +69,23 @@ fn parquet_bytes() -> Vec<u8> {
     out
 }
 
-fn xlsx_bytes() -> Vec<u8> {
+/// rust_xlsxwriter stamps the creation time into every workbook: build each
+/// fixture once, so the uploaded and the local copy are the same bytes.
+fn make_xlsx() -> Vec<u8> {
     let mut wb = rust_xlsxwriter::Workbook::new();
     let ws = wb.add_worksheet();
     ws.write_string(0, 0, "qty").unwrap();
     ws.write_number(1, 0, 3).unwrap();
     wb.save_to_buffer().unwrap()
 }
+
+static PARQUET: std::sync::LazyLock<Vec<u8>> =
+    std::sync::LazyLock::new(make_parquet);
+static XLSX: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(make_xlsx);
+
+fn parquet_bytes() -> Vec<u8> { PARQUET.clone() }
+
+fn xlsx_bytes() -> Vec<u8> { XLSX.clone() }
 
 /// A fresh, versioned bucket with four sources under `in/`.
 async fn fixture(s3: &Client) -> String {
