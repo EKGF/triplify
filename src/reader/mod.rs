@@ -9,26 +9,136 @@ use {
     crate::{
         emit::{CellValue, SourceEmitter, ViewEmitter},
         formula::{Formula, R1C1},
-        iri::{ColumnNumber, RowNumber},
-        source::{Source, SourceKind},
+        iri::{ColumnNumber, ContentDigest, RowNumber},
+        s3::{S3Store, S3Url},
+        source::{Origin, Source, SourceKind},
     },
-    std::collections::{BTreeMap, BTreeSet},
+    anyhow::Context as _,
+    std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    },
+    tokio::io::AsyncRead,
 };
 
 /// Read `source` completely, emitting into `emitter`.
 pub async fn read(
     source: &Source,
     emitter: SourceEmitter,
+    store: &Arc<S3Store>,
 ) -> anyhow::Result<SourceEmitter> {
-    match source.kind() {
-        SourceKind::Csv => csv::read(source.path(), b',', emitter).await,
-        SourceKind::Tsv => csv::read(source.path(), b'\t', emitter).await,
-        SourceKind::Parquet => {
-            parquet::read(source.path().to_owned(), emitter).await
+    let delimiter = match source.kind() {
+        SourceKind::Tsv => b'\t',
+        _ => b',',
+    };
+    match (source.kind(), source.origin()) {
+        (SourceKind::Csv | SourceKind::Tsv, Origin::Local { path, .. }) => {
+            let file = tokio::fs::File::open(path).await?;
+            csv::read(file, delimiter, emitter).await
         },
-        SourceKind::Xlsx | SourceKind::Xls | SourceKind::Ods => {
-            spreadsheet::read(source.path().to_owned(), emitter).await
+        (SourceKind::Csv | SourceKind::Tsv, Origin::S3 { url, meta }) => {
+            let body = store.get(url, meta, None).await?.into_async_read();
+            let body = Verified::new(body, source.digest());
+            csv::read(body, delimiter, emitter).await
         },
+        (SourceKind::Parquet, Origin::Local { path, .. }) => {
+            let file = std::fs::File::open(path)
+                .with_context(|| format!("cannot open {}", path.display()))?;
+            parquet::read(file, emitter).await
+        },
+        (SourceKind::Parquet, Origin::S3 { url, meta }) => {
+            let chunks = parquet::S3Chunks::new(
+                Arc::clone(store),
+                url.clone(),
+                (**meta).clone(),
+            );
+            parquet::read(chunks, emitter).await
+        },
+        (
+            SourceKind::Xlsx | SourceKind::Xls | SourceKind::Ods,
+            Origin::Local { path, .. },
+        ) => {
+            spreadsheet::read(spreadsheet::Input::Path(path.clone()), emitter)
+                .await
+        },
+        (
+            SourceKind::Xlsx | SourceKind::Xls | SourceKind::Ods,
+            Origin::S3 { url, meta },
+        ) => {
+            // A workbook is a zip whose index is at its end: buffer it.
+            let bytes = store
+                .get(url, meta, None)
+                .await?
+                .collect()
+                .await?
+                .into_bytes();
+            verify(&bytes, source.digest(), url)?;
+            spreadsheet::read(spreadsheet::Input::Bytes(bytes), emitter).await
+        },
+    }
+}
+
+/// Re-hashes bytes as they are consumed and fails at the end if they are
+/// not the bytes the source's IRIs were minted from.
+struct Verified<R> {
+    inner:    R,
+    hasher:   Option<sha2::Sha256>,
+    expected: ContentDigest,
+}
+
+impl<R> Verified<R> {
+    fn new(inner: R, expected: ContentDigest) -> Self {
+        use sha2::Digest as _;
+        Self { inner, hasher: Some(sha2::Sha256::new()), expected }
+    }
+}
+
+/// Fail unless `bytes` are the bytes the source's IRIs were minted from.
+fn verify(
+    bytes: &[u8],
+    expected: ContentDigest,
+    what: &S3Url,
+) -> anyhow::Result<()> {
+    use sha2::Digest as _;
+    let got = ContentDigest::new(sha2::Sha256::digest(bytes).into());
+    anyhow::ensure!(
+        got == expected,
+        "{what}: content does not match its SHA-256 ({expected})"
+    );
+    Ok(())
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for Verified<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use {sha2::Digest as _, std::task::Poll};
+        let before = buf.filled().len();
+        let this = &mut *self;
+        match std::pin::Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                let new = &buf.filled()[before..];
+                if !new.is_empty() {
+                    if let Some(h) = this.hasher.as_mut() {
+                        h.update(new);
+                    }
+                } else if let Some(h) = this.hasher.take() {
+                    let got = ContentDigest::new(h.finalize().into());
+                    if got != this.expected {
+                        return Poll::Ready(Err(std::io::Error::other(
+                            format!(
+                                "content does not match its SHA-256 ({})",
+                                this.expected
+                            ),
+                        )));
+                    }
+                }
+                Poll::Ready(Ok(()))
+            },
+            other => other,
+        }
     }
 }
 

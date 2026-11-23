@@ -101,6 +101,29 @@ For a file inside a Git work tree, the source also records:
 - `raw:gitPath`: the path relative to the work tree;
 - `raw:gitModified`: whether the bytes read differ from that path in `HEAD`.
 
+## S3 objects
+
+A source read from S3 is also a `raw:S3Object`, with the metadata S3 reports:
+
+| Property | From S3 |
+| --- | --- |
+| `raw:s3Bucket`, `raw:s3Key`, `raw:s3Region`, `raw:s3Endpoint`, `raw:s3VersionId` | location and version |
+| `raw:s3ETag` | the ETag, without quotes |
+| `raw:s3ContentType`, `raw:s3ContentEncoding`, `raw:s3ContentLanguage`, `raw:s3ContentDisposition`, `raw:s3CacheControl` | stored headers, verbatim |
+| `raw:s3StorageClass`, `raw:s3PartsCount`, `raw:s3ReplicationStatus`, `raw:s3Expiration` | object state |
+| `raw:s3ChecksumType`, `raw:s3ChecksumCrc32`, `raw:s3ChecksumCrc32c`, `raw:s3ChecksumCrc64Nvme`, `raw:s3ChecksumSha1`, `raw:s3ChecksumSha256` | S3's own checksums, base64 |
+| `raw:s3ServerSideEncryption`, `raw:s3KmsKeyId`, `raw:s3BucketKeyEnabled` | encryption |
+| `raw:s3ObjectLockMode`, `raw:s3ObjectLockRetainUntil`, `raw:s3ObjectLockLegalHold` | Object Lock |
+| `raw:s3Tag` → `raw:S3Tag`, `raw:s3UserMetadata` → `raw:S3UserMetadataEntry` | tags and user metadata, each with `raw:s3EntryKey` and `raw:s3EntryValue` |
+
+The distribution metadata applies too:
+- `dcat:downloadURL` and `prov:atLocation` are the `s3://` URL;
+- `dcterms:modified` is the object's last-modified time;
+- `dcat:byteSize` is its size.
+
+`raw:gitBlob` is present only when triplify read the content to fingerprint
+it, so it is absent when S3's own SHA-256 was used.
+
 ## Run provenance
 
 The run graph holds a `prov:Activity` with its start and end times, associated

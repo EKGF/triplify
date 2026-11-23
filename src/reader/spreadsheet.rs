@@ -9,16 +9,27 @@ use {
         iri::ViewNumber,
     },
     anyhow::Context,
-    calamine::{Data, DataRef, Reader, Sheets, open_workbook_auto},
-    std::{collections::BTreeMap, path::PathBuf},
+    calamine::{
+        Data,
+        DataRef,
+        Reader,
+        Sheets,
+        open_workbook_auto,
+        open_workbook_auto_from_rs,
+    },
+    std::{
+        collections::BTreeMap,
+        io::{Read, Seek},
+        path::PathBuf,
+    },
     tracing::warn,
 };
 
 type Formulas = BTreeMap<(u64, u32), Formula>;
 
 /// All formulas of a sheet keyed by absolute 0-based position.
-fn formulas(
-    workbook: &mut Sheets<std::io::BufReader<std::fs::File>>,
+fn formulas<RS: Read + Seek>(
+    workbook: &mut Sheets<RS>,
     sheet: &str,
 ) -> Formulas {
     let range = match workbook.worksheet_formula(sheet) {
@@ -53,19 +64,40 @@ fn put(
     }
 }
 
-pub async fn read(
-    path: PathBuf,
-    emitter: SourceEmitter,
-) -> anyhow::Result<SourceEmitter> {
-    tokio::task::spawn_blocking(move || read_blocking(&path, emitter)).await?
+/// A workbook on disk, or fully buffered (from S3).
+pub enum Input {
+    Path(PathBuf),
+    Bytes(bytes::Bytes),
 }
 
-fn read_blocking(
-    path: &std::path::Path,
+pub async fn read(
+    input: Input,
+    emitter: SourceEmitter,
+) -> anyhow::Result<SourceEmitter> {
+    tokio::task::spawn_blocking(move || {
+        match input {
+            Input::Path(path) => {
+                let workbook =
+                    open_workbook_auto(&path).with_context(|| {
+                        format!("cannot open {}", path.display())
+                    })?;
+                read_blocking(workbook, emitter)
+            },
+            Input::Bytes(bytes) => {
+                let workbook =
+                    open_workbook_auto_from_rs(std::io::Cursor::new(bytes))
+                        .context("cannot open workbook")?;
+                read_blocking(workbook, emitter)
+            },
+        }
+    })
+    .await?
+}
+
+fn read_blocking<RS: Read + Seek>(
+    mut workbook: Sheets<RS>,
     mut emitter: SourceEmitter,
 ) -> anyhow::Result<SourceEmitter> {
-    let mut workbook = open_workbook_auto(path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
     let names = workbook.sheet_names();
     for (index, name) in names.iter().enumerate() {
         let number = ViewNumber(u32::try_from(index + 1)?);
