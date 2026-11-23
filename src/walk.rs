@@ -1,31 +1,92 @@
 //! Fast, `.gitignore`-aware discovery of everything we can triplify.
 
 use {
-    crate::source::SourceKind,
-    std::path::PathBuf,
+    crate::{
+        location::Location,
+        s3::{S3Store, S3Url},
+        source::SourceKind,
+    },
+    std::{
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    },
     tokio::sync::mpsc,
-    tracing::warn,
+    tracing::{error, warn},
 };
 
-/// A file worth triplifying.
+/// A source worth triplifying.
 #[derive(Debug, Clone)]
 pub struct Candidate {
-    pub path: PathBuf,
-    pub kind: SourceKind,
+    pub location: Location,
+    pub kind:     SourceKind,
 }
 
-/// Walks the given roots on a blocking thread pool and streams candidates.
+/// Walks local roots on a blocking thread and lists S3 prefixes, streaming
+/// candidates as they are found.
 #[derive(Debug, Clone)]
 pub struct Walker {
     roots: Vec<PathBuf>,
+    s3:    Vec<S3Url>,
 }
 
 impl Walker {
-    pub fn new(roots: Vec<PathBuf>) -> Self { Self { roots } }
+    pub fn new(roots: Vec<Location>) -> Self {
+        let mut walker = Self { roots: Vec::new(), s3: Vec::new() };
+        for root in roots {
+            match root {
+                Location::Local(p) => walker.roots.push(p),
+                Location::S3(u) => walker.s3.push(u),
+            }
+        }
+        walker
+    }
 
-    pub fn spawn(self, capacity: usize) -> mpsc::Receiver<Candidate> {
+    /// Start walking. `failed` counts roots that could not be listed.
+    pub fn spawn(
+        self,
+        capacity: usize,
+        store: Arc<S3Store>,
+        failed: Arc<AtomicU64>,
+    ) -> mpsc::Receiver<Candidate> {
         let (tx, rx) = mpsc::channel(capacity);
-        tokio::task::spawn_blocking(move || self.walk(&tx));
+        for url in self.s3.clone() {
+            let (tx, store, failed) = (
+                tx.clone(),
+                Arc::clone(&store),
+                Arc::clone(&failed),
+            );
+            tokio::spawn(async move {
+                match store.list(&url).await {
+                    Ok(objects) => {
+                        for object in objects {
+                            let Some(kind) =
+                                SourceKind::from_name(object.file_name())
+                            else {
+                                continue;
+                            };
+                            let location = Location::S3(object);
+                            if tx
+                                .send(Candidate { location, kind })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        error!("{url}: {e:#}");
+                        failed.fetch_add(1, Ordering::Relaxed);
+                    },
+                }
+            });
+        }
+        if !self.roots.is_empty() {
+            tokio::task::spawn_blocking(move || self.walk(&tx));
+        }
         rx
     }
 
@@ -69,7 +130,13 @@ impl Walker {
                 let Some(kind) = SourceKind::from_path(&path) else {
                     return Continue
                 };
-                if tx.blocking_send(Candidate { path, kind }).is_err() {
+                if tx
+                    .blocking_send(Candidate {
+                        location: Location::Local(path),
+                        kind,
+                    })
+                    .is_err()
+                {
                     Quit
                 } else {
                     Continue

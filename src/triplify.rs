@@ -4,6 +4,8 @@ use {
     crate::{
         emit::{GraphEmitter, QuadSender, SourceEmitter},
         iri::{ContentDigest, RunIri, SourceIris},
+        location::Location,
+        s3::S3Store,
         source::Source,
         vocab::{dcat, prov, rdf, xsd},
         walk::{Candidate, Walker},
@@ -13,8 +15,11 @@ use {
     oxrdf::{Literal, NamedNode},
     std::{
         collections::HashSet,
-        path::PathBuf,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc,
+            Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
     },
     tokio_stream::wrappers::ReceiverStream,
     tracing::{info, warn},
@@ -31,8 +36,9 @@ pub struct Summary {
 
 #[derive(Debug, Clone)]
 pub struct Triplify {
-    roots:       Vec<PathBuf>,
+    roots:       Vec<Location>,
     output:      Output,
+    store:       Arc<S3Store>,
     concurrency: usize,
     profile:     bool,
 }
@@ -44,10 +50,20 @@ enum Outcome {
 }
 
 impl Triplify {
-    pub fn new(roots: Vec<PathBuf>, output: Output) -> Self {
+    /// Triplify every source under `roots` (local paths or `s3://` URLs).
+    pub fn new(
+        roots: impl IntoIterator<Item = impl Into<Location>>,
+        output: Output,
+    ) -> Self {
         let concurrency =
             std::thread::available_parallelism().map_or(4, |n| n.get());
-        Self { roots, output, concurrency, profile: false }
+        Self {
+            roots: roots.into_iter().map(Into::into).collect(),
+            output,
+            store: Arc::new(S3Store::default()),
+            concurrency,
+            profile: false,
+        }
     }
 
     /// Compute column profiles (counts, inferred datatype, statistics).
@@ -61,7 +77,12 @@ impl Triplify {
         let run = RunIri::new();
         // producers -> [encoder pool] -> writer; bounded for backpressure.
         let (to_writer, rx) = flume::bounded(self.concurrency * 4);
-        let writer = tokio::spawn(self.output.clone().run(rx));
+        let (verdict, verdict_rx) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(self.output.clone().run(
+            rx,
+            Arc::clone(&self.store),
+            verdict_rx,
+        ));
         let (tx, encoders) = match self.output.encoding() {
             Some(encoding) => {
                 let (tx, input) = flume::bounded(self.concurrency * 4);
@@ -73,15 +94,24 @@ impl Triplify {
         };
 
         let seen = Arc::new(Mutex::new(HashSet::<ContentDigest>::new()));
+        let unlisted = Arc::new(AtomicU64::new(0));
         let candidates =
-            ReceiverStream::new(Walker::new(self.roots.clone()).spawn(1024));
+            ReceiverStream::new(Walker::new(self.roots.clone()).spawn(
+                1024,
+                Arc::clone(&self.store),
+                Arc::clone(&unlisted),
+            ));
         let outcomes: Vec<Outcome> = candidates
             .map(|c| self.triplify(c, tx.clone(), Arc::clone(&seen)))
             .buffer_unordered(self.concurrency)
             .collect()
             .await;
 
-        let mut summary = Summary::default();
+        // A root that could not be listed is a failure, like a failed source.
+        let mut summary = Summary {
+            failed: unlisted.load(Ordering::Relaxed),
+            ..Summary::default()
+        };
         let mut produced = Vec::new();
         for o in outcomes {
             match o {
@@ -108,6 +138,8 @@ impl Triplify {
             panicked == 0,
             "{panicked} encoder thread(s) panicked"
         );
+        // Publish (an S3 output) only if every source succeeded.
+        let _ = verdict.send(summary.failed == 0);
         summary.quads = writer.await??;
         Ok(summary)
     }
@@ -118,15 +150,15 @@ impl Triplify {
         tx: QuadSender,
         seen: Arc<Mutex<HashSet<ContentDigest>>>,
     ) -> Outcome {
-        let path = candidate.path.clone();
+        let path = candidate.location.clone();
         match self.triplify_inner(candidate, tx, seen).await {
             Ok(Some(done)) => {
-                info!("triplified {}", path.display());
+                info!("triplified {path}");
                 Outcome::Done(done.0, done.1)
             },
             Ok(None) => Outcome::Duplicate,
             Err(e) => {
-                warn!("{}: {e:#}", path.display());
+                warn!("{path}: {e:#}");
                 Outcome::Failed
             },
         }
@@ -138,7 +170,9 @@ impl Triplify {
         tx: QuadSender,
         seen: Arc<Mutex<HashSet<ContentDigest>>>,
     ) -> anyhow::Result<Option<(NamedNode, NamedNode)>> {
-        let source = Source::open(candidate.path, candidate.kind).await?;
+        let source =
+            Source::open(candidate.location, candidate.kind, &self.store)
+                .await?;
         let fresh = seen
             .lock()
             .map_err(|_| anyhow::anyhow!("poisoned"))?
@@ -147,7 +181,7 @@ impl Triplify {
             info!(
                 "{} has identical content to a file already triplified, \
                  skipping",
-                source.path().display()
+                source.display()
             );
             return Ok(None);
         }
@@ -157,6 +191,7 @@ impl Triplify {
         let emitter = crate::reader::read(
             &source,
             SourceEmitter::new(iris.clone(), out).with_profile(self.profile),
+            &self.store,
         )
         .await?;
         emitter.into_inner().flush().await?;

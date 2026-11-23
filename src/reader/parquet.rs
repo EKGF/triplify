@@ -10,6 +10,7 @@ use {
     crate::{
         emit::{CellValue, SourceEmitter},
         iri::ViewNumber,
+        s3::{S3ObjectMeta, S3Store, S3Url},
     },
     anyhow::Context,
     arrow_array::{
@@ -47,27 +48,30 @@ use {
     },
     arrow_cast::display::{ArrayFormatter, FormatOptions},
     arrow_schema::{DataType, TimeUnit},
+    bytes::{Buf, Bytes},
     chrono::{NaiveDateTime, TimeZone, Utc},
-    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder,
-    std::path::{Path, PathBuf},
+    parquet::{
+        arrow::arrow_reader::ParquetRecordBatchReaderBuilder,
+        errors::ParquetError,
+        file::reader::{ChunkReader, Length},
+    },
+    std::sync::Arc,
 };
 
 const BATCH_ROWS: usize = 8 * 1024;
 
-pub async fn read(
-    path: PathBuf,
+pub async fn read<T: ChunkReader + 'static>(
+    input: T,
     emitter: SourceEmitter,
 ) -> anyhow::Result<SourceEmitter> {
-    tokio::task::spawn_blocking(move || read_blocking(&path, emitter)).await?
+    tokio::task::spawn_blocking(move || read_blocking(input, emitter)).await?
 }
 
-fn read_blocking(
-    path: &Path,
+fn read_blocking<T: ChunkReader + 'static>(
+    input: T,
     mut emitter: SourceEmitter,
 ) -> anyhow::Result<SourceEmitter> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("cannot open {}", path.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+    let reader = ParquetRecordBatchReaderBuilder::try_new(input)?
         .with_batch_size(BATCH_ROWS)
         .build()?;
     let schema = reader.schema();
@@ -272,4 +276,58 @@ fn timestamp(naive: NaiveDateTime, zoned: bool) -> CellValue {
 
 fn time(t: Option<chrono::NaiveTime>) -> anyhow::Result<CellValue> {
     Ok(CellValue::Time(t.context("time out of range")?))
+}
+
+/// A Parquet file in S3, read with ranged GETs: the footer first, then only
+/// the column chunks of each row group. Runs on a blocking thread.
+pub struct S3Chunks {
+    store:  Arc<S3Store>,
+    url:    S3Url,
+    meta:   S3ObjectMeta,
+    handle: tokio::runtime::Handle,
+}
+
+impl S3Chunks {
+    pub fn new(store: Arc<S3Store>, url: S3Url, meta: S3ObjectMeta) -> Self {
+        Self {
+            store,
+            url,
+            meta,
+            handle: tokio::runtime::Handle::current(),
+        }
+    }
+}
+
+impl Length for S3Chunks {
+    fn len(&self) -> u64 { self.meta.size }
+}
+
+impl ChunkReader for S3Chunks {
+    type T = bytes::buf::Reader<Bytes>;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<Self::T> {
+        let length = usize::try_from(self.meta.size.saturating_sub(start))
+            .map_err(|e| ParquetError::External(Box::new(e)))?;
+        Ok(self.get_bytes(start, length)?.reader())
+    }
+
+    fn get_bytes(
+        &self,
+        start: u64,
+        length: usize,
+    ) -> parquet::errors::Result<Bytes> {
+        if length == 0 {
+            return Ok(Bytes::new());
+        }
+        let end = start + length as u64;
+        self.handle
+            .block_on(async {
+                let body = self
+                    .store
+                    .get(&self.url, &self.meta, Some((start, end)))
+                    .await?;
+                anyhow::Ok(body.collect().await?.into_bytes())
+            })
+            .map_err(|e| ParquetError::External(e.into()))
+    }
 }

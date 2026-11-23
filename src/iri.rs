@@ -164,6 +164,14 @@ impl SourceIris {
 
     pub fn checksum(&self) -> NamedNode { self.name.child("checksum").iri() }
 
+    /// An S3 tag (`kind` = `tag`) or user metadata entry (`metadata`),
+    /// named by its key: `source/<sha256>/s3/<kind>/<percent-encoded key>`.
+    pub fn s3_entry(&self, kind: &str, key: &str) -> NamedNode {
+        let key: String =
+            url::form_urlencoded::byte_serialize(key.as_bytes()).collect();
+        self.name.child("s3").child(kind).child(key).iri()
+    }
+
     pub fn view(&self, v: ViewNumber) -> ViewIris {
         ViewIris::new(self.name.child("view").child(v.0))
     }

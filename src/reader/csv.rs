@@ -7,20 +7,19 @@ use {
         iri::ViewNumber,
     },
     futures::StreamExt,
-    std::path::Path,
+    tokio::io::AsyncRead,
 };
 
 pub async fn read(
-    path: &Path,
+    input: impl AsyncRead + Unpin + Send,
     delimiter: u8,
     mut emitter: SourceEmitter,
 ) -> anyhow::Result<SourceEmitter> {
-    let file = tokio::fs::File::open(path).await?;
     let mut reader = csv_async::AsyncReaderBuilder::new()
         .delimiter(delimiter)
         .has_headers(false)
         .flexible(true)
-        .create_reader(file);
+        .create_reader(input);
     let mut records = reader.byte_records();
     {
         let mut view = emitter.view(ViewNumber(1), None);

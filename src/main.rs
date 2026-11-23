@@ -1,23 +1,22 @@
 use {
     clap::Parser,
-    std::path::PathBuf,
-    triplify::{Triplify, writer::Output},
+    triplify::{Triplify, location::Location, writer::Output},
 };
 
-/// Turn every CSV/TSV/XLSX/XLS/ODS/Parquet file under the given paths into raw
-/// RDF.
+/// Turn every CSV/TSV/XLSX/XLS/ODS/Parquet file under the given paths or S3
+/// prefixes into raw RDF.
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Files or directories to triplify (directories are walked,
-    /// honouring .gitignore).
+    /// Files, directories (walked, honouring .gitignore), S3 objects
+    /// (s3://bucket/key) or S3 prefixes (s3://bucket/prefix/).
     #[arg(default_value = ".")]
-    paths: Vec<PathBuf>,
+    paths: Vec<Location>,
 
-    /// Output file: .nq, .nt (graphs merged) or .trig, optionally .gz.
-    /// Defaults to N-Quads on stdout.
+    /// Output file or S3 object: .nq, .nt (graphs merged) or .trig,
+    /// optionally .gz. Defaults to N-Quads on stdout.
     #[arg(short, long)]
-    output: Option<PathBuf>,
+    output: Option<Location>,
 
     /// Emit RDFC-1.0 canonical N-Quads/N-Triples (buffers the dataset in
     /// memory).
@@ -53,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
     let output = match cli.output {
-        Some(path) => Output::file(path, cli.canonical)?,
+        Some(location) => Output::to(location, cli.canonical)?,
         None => Output::stdout(cli.canonical),
     };
     let summary = Triplify::new(cli.paths, output)

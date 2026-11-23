@@ -6,7 +6,12 @@
 //! needs the whole dataset in memory, everything else streams.
 
 use {
-    crate::{emit::QuadBatch, encode::Encoding},
+    crate::{
+        emit::QuadBatch,
+        encode::Encoding,
+        location::Location,
+        s3::{S3Store, S3Upload, S3Url},
+    },
     anyhow::Context,
     async_compression::tokio::write::GzipEncoder,
     oxrdf::{
@@ -14,7 +19,7 @@ use {
         graph::{CanonicalizationAlgorithm, CanonicalizationHashAlgorithm},
     },
     oxrdfio::{RdfFormat, RdfSerializer},
-    std::{path::PathBuf, pin::Pin},
+    std::{path::PathBuf, pin::Pin, sync::Arc},
     tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter},
 };
 
@@ -53,6 +58,7 @@ impl Syntax {
 pub enum Target {
     Stdout,
     File(PathBuf),
+    S3(S3Url),
 }
 
 /// Fully resolved output: where, which syntax, compressed, canonical.
@@ -62,6 +68,14 @@ pub struct Output {
     syntax:    Syntax,
     gzip:      bool,
     canonical: bool,
+}
+
+fn self_target(t: &Target) -> String {
+    match t {
+        Target::Stdout => "stdout".into(),
+        Target::File(p) => p.display().to_string(),
+        Target::S3(u) => u.to_string(),
+    }
 }
 
 impl Output {
@@ -75,10 +89,15 @@ impl Output {
     }
 
     pub fn file(path: PathBuf, canonical: bool) -> anyhow::Result<Self> {
-        let name = path
+        Self::to(Location::Local(path), canonical)
+    }
+
+    /// Output to a local file or an S3 object; the syntax follows from the
+    /// name (`.nq`, `.nt`, `.trig`, each optionally `.gz`).
+    pub fn to(location: Location, canonical: bool) -> anyhow::Result<Self> {
+        let name = location
             .file_name()
-            .and_then(|n| n.to_str())
-            .context("output path has no file name")?
+            .context("output has no file name")?
             .to_ascii_lowercase();
         let (stem, gzip) = match name.strip_suffix(".gz") {
             Some(stem) => (stem.to_owned(), true),
@@ -99,16 +118,31 @@ impl Output {
             !canonical || syntax != Syntax::TriG,
             "RDFC-1.0 canonical output is N-Quads or N-Triples, not TriG"
         );
-        Ok(Self {
-            target: Target::File(path),
-            syntax,
-            gzip,
-            canonical,
-        })
+        let target = match location {
+            Location::Local(path) => Target::File(path),
+            Location::S3(url) => Target::S3(url),
+        };
+        Ok(Self { target, syntax, gzip, canonical })
     }
 
-    async fn sink(&self) -> anyhow::Result<Sink> {
+    /// The Content-Type of the output object.
+    fn content_type(&self) -> &'static str {
+        match (self.gzip, self.syntax) {
+            (true, _) => "application/gzip",
+            (false, Syntax::NQuads) => "application/n-quads",
+            (false, Syntax::NTriples) => "application/n-triples",
+            (false, Syntax::TriG) => "application/trig",
+        }
+    }
+
+    async fn sink(
+        &self,
+        upload: Option<tokio::io::DuplexStream>,
+    ) -> anyhow::Result<Sink> {
         let raw: Sink = match &self.target {
+            Target::S3(_) => {
+                Box::pin(upload.context("S3 output without an upload")?)
+            },
             // Unbuffered stdout costs one write system call per quad.
             Target::Stdout => {
                 Box::pin(BufWriter::with_capacity(
@@ -142,18 +176,58 @@ impl Output {
         }
     }
 
-    /// Consume all batches; returns the number of quads received.
+    /// Consume all batches; returns the number of quads received. An S3
+    /// output is published only if everything was written and `verdict`
+    /// says the run succeeded; otherwise its upload is aborted, so a failed
+    /// run never creates the object (or its S3 event).
     pub async fn run(
         self,
         rx: flume::Receiver<QuadBatch>,
+        store: Arc<S3Store>,
+        verdict: tokio::sync::oneshot::Receiver<bool>,
+    ) -> anyhow::Result<u64> {
+        let mut upload = match &self.target {
+            Target::S3(url) => {
+                Some(S3Upload::start(&store, url, self.content_type()).await?)
+            },
+            _ => None,
+        };
+        let pipe = upload.as_mut().map(S3Upload::writer);
+        let target = self.target.clone();
+        let result = self.write(rx, pipe).await;
+        match (upload, result) {
+            (Some(upload), Ok(count)) => {
+                if verdict.await.unwrap_or(false) {
+                    upload.commit().await?;
+                } else {
+                    upload.abort().await;
+                    tracing::warn!(
+                        "{}: not published, the run failed",
+                        self_target(&target)
+                    );
+                }
+                Ok(count)
+            },
+            (Some(upload), Err(e)) => {
+                upload.abort().await;
+                Err(e)
+            },
+            (None, result) => result,
+        }
+    }
+
+    async fn write(
+        self,
+        rx: flume::Receiver<QuadBatch>,
+        pipe: Option<tokio::io::DuplexStream>,
     ) -> anyhow::Result<u64> {
         if self.gzip && self.encoding().is_some() {
             return tokio::task::spawn_blocking(move || {
-                self.write_encoded_parallel_gzip(&rx)
+                self.write_encoded_parallel_gzip(&rx, pipe)
             })
             .await?;
         }
-        let mut sink = self.sink().await?;
+        let mut sink = self.sink(pipe).await?;
         let count = if self.canonical {
             self.write_canonical(&mut sink, rx).await?
         } else {
@@ -198,6 +272,7 @@ impl Output {
     fn write_encoded_parallel_gzip(
         &self,
         rx: &flume::Receiver<QuadBatch>,
+        pipe: Option<tokio::io::DuplexStream>,
     ) -> anyhow::Result<u64> {
         use {
             gzp::{
@@ -209,6 +284,11 @@ impl Output {
         };
         let out: Box<dyn std::io::Write + Send> = match &self.target {
             Target::Stdout => Box::new(std::io::stdout()),
+            Target::S3(_) => {
+                Box::new(tokio_util::io::SyncIoBridge::new(
+                    pipe.context("S3 output without an upload")?,
+                ))
+            },
             Target::File(p) => {
                 Box::new(std::fs::File::create(p).with_context(|| {
                     format!("cannot create {}", p.display())
