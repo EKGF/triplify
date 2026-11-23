@@ -28,14 +28,24 @@ pip install triplify
 ```
 
 The wheels contain the native executable, need no Python dependencies and
-download nothing at runtime. They cover Linux (glibc 2.28 or later), macOS 11
-or later and Windows, on x86-64 and ARM64.
+download nothing at runtime. They cover:
 
-## Install with Cargo
+- Linux (glibc 2.28 or later) on x86-64 and ARM64;
+- macOS 11 or later on Apple silicon;
+- Windows on x86-64 and ARM64.
+
+There is no wheel for Intel Macs. On one, build from source instead.
+
+## Build from source
 
 ```sh
-cargo install triplify
+git clone https://github.com/EKGF/triplify
+cd triplify
+cargo install --path . --locked
 ```
+
+Run this inside the checkout: rustup then installs the pinned nightly
+toolchain from `rust-toolchain.toml` automatically.
 
 ## Check the installation
 

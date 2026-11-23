@@ -34,8 +34,9 @@ Install the native executable with uv:
 uv tool install triplify
 ```
 
-Alternatively, use `pipx install triplify`, `pip install triplify` or
-`cargo install triplify`. See [Install](https://ekgf.github.io/triplify/install/)
+Alternatively, use `pipx install triplify` or `pip install triplify`. Wheels
+cover Linux and Windows (x86-64, ARM64) and macOS on Apple silicon. On an
+Intel Mac, build from source. See [Install](https://ekgf.github.io/triplify/install/)
 for platform support and source builds.
 
 ## License

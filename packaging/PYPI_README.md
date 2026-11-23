@@ -17,8 +17,9 @@ uvx triplify ./dumps -o raw.nt.gz
 ```
 
 The wheel contains the native executable, so it needs no Python dependencies
-and downloads nothing at runtime. Wheels are built for Linux (glibc 2.28+),
-macOS 11+ and Windows, on x86-64 and ARM64.
+and downloads nothing at runtime. Wheels are built for Linux (glibc 2.28+) and
+Windows on x86-64 and ARM64, and for macOS 11+ on Apple silicon. On an Intel
+Mac, build from source: see the repository.
 
 See the [repository](https://github.com/EKGF/triplify) for the output model
 and the IRI scheme.
