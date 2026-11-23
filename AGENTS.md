@@ -48,6 +48,14 @@ Performance: run `scripts/bench.sh 0.1` before and after changes to the
 emit, encode or writer path. Output must stay byte-identical: compare the
 sorted N-Quads of the old and new builds, excluding the run graph.
 
+S3: `tests/s3.rs` runs against any S3 API when `TRIPLIFY_TEST_S3=1`:
+
+```sh
+docker run -d -p 4566:4566 -e SERVICES=s3 localstack/localstack:4.4
+TRIPLIFY_TEST_S3=1 AWS_ENDPOINT_URL=http://127.0.0.1:4566 AWS_ACCESS_KEY_ID=test \
+  AWS_SECRET_ACCESS_KEY=test AWS_REGION=us-east-1 cargo test --test s3
+```
+
 SHACL conformance against the upstream ontology:
 
 ```sh

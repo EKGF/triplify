@@ -21,10 +21,10 @@ Triplify turns any tabular data dump (CSV, XLSX, Parquet, ...) into raw RDF usin
 Usage: triplify [OPTIONS] [PATHS]...
 
 Arguments:
-  [PATHS]...  Files or directories to triplify (directories are walked, honouring .gitignore) [default: .]
+  [PATHS]...  Files, directories (walked, honouring .gitignore), S3 objects (s3://bucket/key) or S3 prefixes (s3://bucket/prefix/) [default: .]
 
 Options:
-  -o, --output <OUTPUT>  Output file: .nq, .nt (graphs merged) or .trig, optionally .gz. Defaults to N-Quads on stdout
+  -o, --output <OUTPUT>  Output file or S3 object: .nq, .nt (graphs merged) or .trig, optionally .gz. Defaults to N-Quads on stdout
       --canonical        Emit RDFC-1.0 canonical N-Quads/N-Triples (buffers the dataset in memory)
       --profile          Profile every column: exact value/null/distinct counts, most frequent value, an inferred datatype with its conforming count, and min/max/mean/std/percentiles. Costs memory per column and time
   -v, --verbose...       Increase logging verbosity
@@ -69,6 +69,56 @@ The output file name selects the syntax. Add `.gz` to compress it with gzip.
 
 Any other extension is an error. Output always streams, except with
 `--canonical`.
+
+## Amazon S3
+
+Inputs and the output can be S3 objects. An input ending in `/` is a prefix:
+every object below it with a supported extension is triplified.
+
+```sh
+triplify s3://dumps/crm/2026-11-23/ -o s3://lake/raw/crm-2026-11-23.nq.gz
+triplify s3://dumps/erp/orders.parquet ./local/rates.xlsx -o raw.nq
+```
+
+- **Credentials, region and endpoint** come from the standard AWS chain:
+  - environment variables (`AWS_ACCESS_KEY_ID`, `AWS_REGION`, ...);
+  - `~/.aws` profiles, including SSO;
+  - ECS task roles, Lambda, and EC2 instance metadata.
+
+  `AWS_ENDPOINT_URL` selects an S3-compatible store, which is then addressed
+  path-style.
+- **Streaming:**
+  - CSV and TSV objects stream straight from S3;
+  - Parquet is read with ranged GETs, which fetch the footer and then only
+    the column chunks it needs;
+  - workbooks (XLSX, XLS, ODS) are buffered in memory, because a workbook is a
+    zip archive with its index at the end.
+
+  Nothing is written to local disk.
+- **One read when S3 has the hash.** IRIs are minted from the SHA-256 of the
+  content. If the object has a full-object SHA-256 checksum, for example
+  because it was uploaded with `--checksum-algorithm SHA256`, triplify uses
+  it and reads the object once. Otherwise it streams the object once to hash
+  it and a second time to read it.
+- **Consistent reads.** Both reads use `If-Match` on the ETag, and the
+  version id when the bucket is versioned, so an object that changes
+  in between fails the run instead of mixing two versions. The bytes are
+  re-hashed while they are read and must match.
+- **Output** to `s3://…` is a streaming multipart upload, including parallel
+  gzip. The object is published only if the whole run succeeded. If any
+  source fails, the upload is aborted: no partial object, and no S3 event
+  for downstream steps.
+- **Metadata** about every object is captured as well: version, ETag,
+  checksums, encryption, Object Lock, tags and user metadata. See
+  [Output model](../output-model/#s3-objects). Tags need
+  `s3:GetObjectTagging`; without that permission a warning is logged and the
+  tags are left out.
+
+IAM permissions:
+- reading needs `s3:GetObject` and `s3:ListBucket`, plus
+  `s3:GetObjectVersion`, `s3:GetObjectTagging` and `s3:GetObjectVersionTagging`
+  for the full metadata;
+- writing needs `s3:PutObject` and `s3:AbortMultipartUpload`.
 
 ## Canonical output
 
