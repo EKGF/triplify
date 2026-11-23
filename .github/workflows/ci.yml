@@ -25,6 +25,33 @@ jobs:
       - run: cargo test --locked --lib
       - run: cargo test --locked --tests
 
+  s3:
+    name: test s3 (LocalStack)
+    runs-on: ubuntu-latest
+    env:
+      TRIPLIFY_TEST_S3: "1"
+      AWS_ENDPOINT_URL: http://127.0.0.1:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start LocalStack S3
+        shell: bash
+        run: |
+          # 4.4 is the last community image that runs without a license.
+          docker run -d --name s3 -p 4566:4566 -e SERVICES=s3 localstack/localstack:4.4 || exit $?
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:4566/_localstack/health >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          docker logs s3
+          printf 'LocalStack did not become healthy\n' >&2
+          exit 1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --test s3
+
   wheels:
     name: wheel ${{ matrix.target }}
     # Pull requests only run the tests; main, tags and manual runs build wheels.
