@@ -1,8 +1,8 @@
 # Triplify
 
 [![CI](https://github.com/EKGF/triplify/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/EKGF/triplify/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/triplify)](https://crates.io/crates/triplify)
 [![PyPI](https://img.shields.io/pypi/v/triplify)](https://pypi.org/project/triplify/)
-[![Python](https://img.shields.io/pypi/pyversions/triplify)](https://pypi.org/project/triplify/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Turn CSV files and spreadsheets into RDF, preserving their original structure and values.
