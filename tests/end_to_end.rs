@@ -6,7 +6,7 @@ use {
     std::{io::Read, path::Path},
     triplify::{
         Triplify,
-        vocab::{dcat, raw, rdf, xsd},
+        vocab::{dcat, raw, rdf, rdfs, xsd},
         writer::Output,
     },
 };
@@ -222,4 +222,59 @@ async fn profile_states_inferred_datatypes_on_columns() {
     // Values keep their source literals: still plain strings.
     assert!(ds.iter().all(|q| q.predicate != raw::LITERAL_VALUE
         || matches!(q.object, oxrdf::TermRef::Literal(l) if l.datatype() == xsd::STRING)));
+}
+
+#[tokio::test]
+async fn no_header_makes_the_first_row_data() {
+    use triplify::emit::Header;
+    let input = tempfile::tempdir().unwrap();
+    std::fs::write(input.path().join("plain.csv"), "1,Alice\n2,Bob\n").unwrap();
+    let mut wb = rust_xlsxwriter::Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.write_number(0, 0, 10).unwrap();
+    ws.write_number(1, 0, 20).unwrap();
+    wb.save(input.path().join("plain.xlsx")).unwrap();
+
+    let run = |header: Header| {
+        let dir = input.path().to_owned();
+        async move {
+            let out_dir = tempfile::tempdir().unwrap();
+            let out = out_dir.path().join("o.nq");
+            Triplify::new(
+                vec![dir],
+                Output::file(out.clone(), false).unwrap(),
+            )
+            .with_header(header)
+            .run()
+            .await
+            .unwrap();
+            load(&std::fs::read(&out).unwrap(), RdfFormat::NQuads)
+        }
+    };
+    let absent = run(Header::Absent).await;
+    // CSV: 2 rows × 2 values; XLSX: 2 rows × 1 value.
+    assert_eq!(count(&absent, rdf::TYPE, raw::ROW), 4);
+    assert_eq!(count(&absent, rdf::TYPE, raw::VALUE), 6);
+    assert_eq!(
+        absent.iter().filter(|q| q.predicate == rdfs::LABEL).count(),
+        1,
+        "only the worksheet's own name; columns have no labels"
+    );
+    let numbers: Vec<String> = {
+        let mut v: Vec<String> = absent
+            .iter()
+            .filter(|q| q.predicate == raw::VIEW_ROW_NUMBER)
+            .map(|q| q.object.to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    assert!(
+        numbers[0].starts_with("\"0\""),
+        "rows count from 0: {numbers:?}"
+    );
+
+    let first_row = run(Header::FirstRow).await;
+    assert_eq!(count(&first_row, rdf::TYPE, raw::ROW), 2);
+    assert_eq!(count(&first_row, rdf::TYPE, raw::VALUE), 3);
 }

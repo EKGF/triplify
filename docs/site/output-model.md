@@ -53,6 +53,9 @@ its header, and the rows after it are data.
   - a Parquet null is an explicit source null, so it becomes a `raw:NullValue`;
   - nested lists, structs and maps are captured as their display text
     (`[x, y]`) until the raw model supports nesting.
+- **Header rows are labels.** The first row of a CSV/TSV file or worksheet
+  names the columns (`rdfs:label`) unless `--no-header` is given. In that
+  case every row is data.
 - **Columns are physical.** Header text is only a label, and ragged rows just
   add columns.
 - **Duplicates once.** Identical files found twice are triplified once.

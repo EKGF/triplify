@@ -8,7 +8,7 @@
 use {
     super::TableBuilder,
     crate::{
-        emit::{CellValue, SourceEmitter},
+        emit::{CellValue, Header, SourceEmitter},
         iri::ViewNumber,
         s3::{S3ObjectMeta, S3Store, S3Url},
     },
@@ -77,7 +77,7 @@ fn read_blocking<T: ChunkReader + 'static>(
     let schema = reader.schema();
     {
         let mut view = emitter.view(ViewNumber(1), None);
-        let mut table = TableBuilder::new(&mut view);
+        let mut table = TableBuilder::new(&mut view, Header::FirstRow);
         for (c, field) in schema.fields().iter().enumerate() {
             table.cell(
                 0,

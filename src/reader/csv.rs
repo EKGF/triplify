@@ -23,7 +23,8 @@ pub async fn read(
     let mut records = reader.byte_records();
     {
         let mut view = emitter.view(ViewNumber(1), None);
-        let mut table = TableBuilder::new(&mut view);
+        let header = view.header();
+        let mut table = TableBuilder::new(&mut view, header);
         let mut row: u64 = 0;
         while let Some(record) = records.next().await {
             let record = record?;

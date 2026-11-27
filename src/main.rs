@@ -1,6 +1,6 @@
 use {
     clap::Parser,
-    triplify::{Triplify, location::Location, writer::Output},
+    triplify::{Triplify, emit::Header, location::Location, writer::Output},
 };
 
 /// Turn every CSV/TSV/XLSX/XLS/ODS/Parquet file under the given paths or S3
@@ -28,6 +28,11 @@ struct Cli {
     /// min/max/mean/std/percentiles. Costs memory per column and time.
     #[arg(long)]
     profile: bool,
+
+    /// CSV/TSV files and worksheets have no header row: the first row is
+    /// data and columns get no labels. Parquet always uses its schema.
+    #[arg(long)]
+    no_header: bool,
 
     #[command(flatten)]
     verbose: clap_verbosity_flag::Verbosity<clap_verbosity_flag::WarnLevel>,
@@ -57,6 +62,13 @@ async fn main() -> anyhow::Result<()> {
     };
     let summary = Triplify::new(cli.paths, output)
         .with_profile(cli.profile)
+        .with_header(
+            if cli.no_header {
+                Header::Absent
+            } else {
+                Header::FirstRow
+            },
+        )
         .run()
         .await?;
     tracing::info!(?summary, "done");

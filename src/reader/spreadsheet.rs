@@ -103,7 +103,8 @@ fn read_blocking<RS: Read + Seek>(
         let number = ViewNumber(u32::try_from(index + 1)?);
         let mut view = emitter.view(number, Some(name));
         let mut formulas = formulas(&mut workbook, name);
-        let mut table = TableBuilder::new(&mut view);
+        let header = view.header();
+        let mut table = TableBuilder::new(&mut view, header);
         match &mut workbook {
             // XLSX: true streaming, one cell at a time.
             Sheets::Xlsx(xlsx) => {
