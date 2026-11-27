@@ -9,6 +9,11 @@ license = "MIT"
 repository = "https://github.com/EKGF/triplify"
 include = ["/src/**", "/Cargo.toml", "/Cargo.lock", "/LICENSE", "/README.md"]
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.{ archive-format }"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "zip"
+
 [dependencies]
 anyhow = "1"
 arrow-array = "60.1"
