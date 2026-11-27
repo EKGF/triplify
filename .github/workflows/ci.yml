@@ -157,11 +157,56 @@ jobs:
           path: assets
           pattern: binary-*
           merge-multiple: true
+      - name: Render the Homebrew formula
+        # EKGF/homebrew-tap copies triplify.rb from the latest release.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME"
+          sha() { sha256sum "assets/triplify-$1.zip" | cut -d' ' -f1; }
+          darwin_arm=$(sha aarch64-apple-darwin) || exit $?
+          linux_arm=$(sha aarch64-unknown-linux-gnu) || exit $?
+          linux_x86=$(sha x86_64-unknown-linux-gnu) || exit $?
+          cat > assets/triplify.rb <<RUBY || exit $?
+          class Triplify < Formula
+            desc "Turn CSV, spreadsheets and Parquet into raw RDF without mapping"
+            homepage "https://ekgf.github.io/triplify/"
+            license "MIT"
+
+            on_macos do
+              depends_on arch: :arm64
+              on_arm do
+                url "$base/triplify-aarch64-apple-darwin.zip"
+                sha256 "$darwin_arm"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "$base/triplify-aarch64-unknown-linux-gnu.zip"
+                sha256 "$linux_arm"
+              end
+              on_intel do
+                url "$base/triplify-x86_64-unknown-linux-gnu.zip"
+                sha256 "$linux_x86"
+              end
+            end
+
+            def install
+              bin.install "triplify"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/triplify --version")
+            end
+          end
+          RUBY
+          sed -i 's/^          //' assets/triplify.rb || exit $?
+          printf 'rendered triplify.rb for %s\n' "$version"
       - name: Create the release with the binaries
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" assets/*.zip \
+          gh release create "$GITHUB_REF_NAME" assets/*.zip assets/triplify.rb \
             --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes || exit $?
 
   publish-crates:
