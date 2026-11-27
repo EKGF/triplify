@@ -1,5 +1,10 @@
 # Triplify
 
+[![CI](https://github.com/EKGF/triplify/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/EKGF/triplify/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/triplify)](https://pypi.org/project/triplify/)
+[![Python](https://img.shields.io/pypi/pyversions/triplify)](https://pypi.org/project/triplify/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 Turn CSV files and spreadsheets into RDF, preserving their original structure and values.
 
 Capture your source data without defining a mapping first. Use SPARQL and SHACL
