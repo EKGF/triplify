@@ -39,6 +39,8 @@ Install the native executable with uv:
 uv tool install triplify
 ```
 
+On macOS and Linux you can also use `brew install ekgf/tap/triplify`.
+
 Alternatively, use `pipx install triplify` or `pip install triplify`, or
 `cargo binstall triplify` for the prebuilt executable through Cargo. Wheels
 and prebuilt executables cover Linux and Windows (x86-64, ARM64) and macOS on

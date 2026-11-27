@@ -1,6 +1,6 @@
 ---
 title: "Install"
-description: "Install the triplify command with uv, pipx, pip or Cargo on Linux, macOS or Windows."
+description: "Install the triplify command with Homebrew, uv, pipx, pip or Cargo on Linux, macOS or Windows."
 permalink: /install/
 nav_order: 2
 grapharch:
@@ -11,6 +11,16 @@ grapharch:
 
 Triplify is a single native executable, `triplify`, written in Rust. The
 package is named `triplify` on both PyPI and crates.io.
+
+## Install with Homebrew
+
+On macOS (Apple silicon) and Linux, install from the [EKGF tap](https://github.com/EKGF/homebrew-tap):
+
+```sh
+brew install ekgf/tap/triplify
+```
+
+The formula is available from release 0.2.1 on.
 
 ## Install from PyPI
 
