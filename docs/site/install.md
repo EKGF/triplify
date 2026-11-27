@@ -34,7 +34,28 @@ download nothing at runtime. They cover:
 - macOS 11 or later on Apple silicon;
 - Windows on x86-64 and ARM64.
 
-There is no wheel for Intel Macs. On one, build from source instead.
+There is no wheel for Intel Macs. On one, install with Cargo instead.
+
+## Install with Cargo
+
+With [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), Cargo
+downloads the prebuilt executable from the GitHub release instead of
+compiling it:
+
+```sh
+cargo binstall triplify
+```
+
+The prebuilt executables cover the same platforms as the wheels. On any other
+platform, and for releases before 0.2.1 (which have no prebuilt executables),
+cargo-binstall compiles from source, as this does:
+
+```sh
+cargo install triplify --locked
+```
+
+Both install from [crates.io](https://crates.io/crates/triplify) into
+`~/.cargo/bin` and work with stable Rust.
 
 ## Build from source
 
