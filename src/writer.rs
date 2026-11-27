@@ -297,7 +297,8 @@ impl Output {
         };
         let threads =
             std::thread::available_parallelism().map_or(4, |n| n.get());
-        // Level 6, as gzip and the single-threaded encoder default to.
+        // Level 6, as gzip and the single-threaded encoder default to. With
+        // zlib-ng it costs half the CPU of zlib at a slightly better ratio.
         let mut gz: ParCompress<Gzip, _> = ParCompressBuilder::new()
             .compression_level(gzp::Compression::new(6))
             .num_threads(threads)
