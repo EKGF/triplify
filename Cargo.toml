@@ -28,7 +28,7 @@ csv-async = { version = "1.3", features = ["tokio"] }
 flume = "0.12.0"
 futures = "0.3"
 gix = { version = "0.90", default-features = false, features = ["sha1", "revision"] }
-gzp = { version = "2.0.4", default-features = false, features = ["deflate_zlib"] }
+gzp = { version = "2.0.4", default-features = false, features = ["deflate_zlib_ng"] }
 hex = "0.4"
 ignore = "0.4.34"
 itoa = "1.0.19"
