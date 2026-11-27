@@ -2,7 +2,7 @@
 
 use {
     crate::{
-        emit::{GraphEmitter, QuadSender, SourceEmitter},
+        emit::{GraphEmitter, Header, QuadSender, SourceEmitter},
         iri::{ContentDigest, RunIri, SourceIris},
         location::Location,
         s3::S3Store,
@@ -41,6 +41,7 @@ pub struct Triplify {
     store:       Arc<S3Store>,
     concurrency: usize,
     profile:     bool,
+    header:      Header,
 }
 
 enum Outcome {
@@ -63,7 +64,15 @@ impl Triplify {
             store: Arc::new(S3Store::default()),
             concurrency,
             profile: false,
+            header: Header::FirstRow,
         }
+    }
+
+    /// Whether CSV/TSV files and worksheets start with a header row.
+    /// Parquet column names always come from its schema.
+    pub fn with_header(mut self, header: Header) -> Self {
+        self.header = header;
+        self
     }
 
     /// Compute column profiles (counts, inferred datatype, statistics).
@@ -190,7 +199,9 @@ impl Triplify {
         source.describe(&iris, &mut out);
         let emitter = crate::reader::read(
             &source,
-            SourceEmitter::new(iris.clone(), out).with_profile(self.profile),
+            SourceEmitter::new(iris.clone(), out)
+                .with_profile(self.profile)
+                .with_header(self.header),
             &self.store,
         )
         .await?;

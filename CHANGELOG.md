@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- `--no-header`: the first row of CSV/TSV files and worksheets is data and
+  columns get no labels. Parquet always uses its schema's names.
+
 ## 0.2.0 (2026-11-27)
 
 ### Features

@@ -263,22 +263,44 @@ impl GraphEmitter {
     }
 }
 
+/// Whether a table's first row names its columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Header {
+    /// The first row holds column names (`rdfs:label`), not data.
+    #[default]
+    FirstRow,
+    /// Every row is data; columns have no labels (`--no-header`).
+    Absent,
+}
+
 /// Emits one source graph: the source, its views, columns, rows and values.
 #[derive(Debug)]
 pub struct SourceEmitter {
     iris:    SourceIris,
     out:     GraphEmitter,
     profile: bool,
+    header:  Header,
 }
 
 impl SourceEmitter {
     pub fn new(iris: SourceIris, out: GraphEmitter) -> Self {
-        Self { iris, out, profile: false }
+        Self {
+            iris,
+            out,
+            profile: false,
+            header: Header::FirstRow,
+        }
     }
 
     /// Profile every column (`--profile`).
     pub fn with_profile(mut self, profile: bool) -> Self {
         self.profile = profile;
+        self
+    }
+
+    /// How readers of header-optional formats treat the first row.
+    pub fn with_header(mut self, header: Header) -> Self {
+        self.header = header;
         self
     }
 
@@ -317,6 +339,7 @@ impl SourceEmitter {
         ViewEmitter {
             iris,
             view,
+            header: self.header,
             out,
             columns: Vec::new(),
             row: None,
@@ -330,6 +353,7 @@ impl SourceEmitter {
 pub struct ViewEmitter<'a> {
     iris:     ViewIris,
     view:     Node,
+    header:   Header,
     out:      &'a mut GraphEmitter,
     /// Declared columns; index `c - 1` holds column `c`.
     columns:  Vec<Node>,
@@ -339,6 +363,9 @@ pub struct ViewEmitter<'a> {
 }
 
 impl ViewEmitter<'_> {
+    /// The configured header mode, for formats where it is optional.
+    pub fn header(&self) -> Header { self.header }
+
     pub fn out(&mut self) -> &mut GraphEmitter { self.out }
 
     fn column_count(&self) -> u32 { self.columns.len() as u32 }

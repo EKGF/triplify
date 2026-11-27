@@ -27,6 +27,7 @@ Options:
   -o, --output <OUTPUT>  Output file or S3 object: .nq, .nt (graphs merged) or .trig, optionally .gz. Defaults to N-Quads on stdout
       --canonical        Emit RDFC-1.0 canonical N-Quads/N-Triples (buffers the dataset in memory)
       --profile          Profile every column: exact value/null/distinct counts, most frequent value, an inferred datatype with its conforming count, and min/max/mean/std/percentiles. Costs memory per column and time
+      --no-header        CSV/TSV files and worksheets have no header row: the first row is data and columns get no labels. Parquet always uses its schema
   -v, --verbose...       Increase logging verbosity
   -q, --quiet...         Decrease logging verbosity
   -h, --help             Print help
@@ -55,6 +56,20 @@ Other files are ignored, and so are Excel lock files such as `~$Book.xlsx`.
 XLSX worksheets are read cell by cell, as a stream. Parquet files are read in
 batches of record rows, and every compression codec is supported (Snappy, Zstd,
 LZ4, Gzip, Brotli).
+
+### Header rows
+
+By default, the first row of a CSV or TSV file and of each worksheet holds
+the column names. They become each column's `rdfs:label`, not data. If your
+files have no header row, as many database `COPY` and mainframe exports
+don't, use `--no-header`. The first row is then data row 0, and columns are
+identified only by their position.
+
+```sh
+triplify --no-header ./exports -o raw.nq.gz
+```
+
+Parquet ignores `--no-header`: its column names come from the file's schema.
 
 ## Output
 

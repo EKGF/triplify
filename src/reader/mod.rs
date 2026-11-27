@@ -7,7 +7,7 @@ mod spreadsheet;
 
 use {
     crate::{
-        emit::{CellValue, SourceEmitter, ViewEmitter},
+        emit::{CellValue, Header, SourceEmitter, ViewEmitter},
         formula::{Formula, R1C1},
         iri::{ColumnNumber, ContentDigest, RowNumber},
         s3::{S3Store, S3Url},
@@ -145,6 +145,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for Verified<R> {
 /// Turns a row-major stream of `(physical row, physical column, cell)` into
 /// raw columns, rows and values. The first physical row seen is the header.
 pub(crate) struct TableBuilder<'v, 'e> {
+    header_mode:     Header,
     view:            &'v mut ViewEmitter<'e>,
     header_row:      Option<u64>,
     header:          BTreeMap<u32, String>,
@@ -154,12 +155,14 @@ pub(crate) struct TableBuilder<'v, 'e> {
 }
 
 impl<'v, 'e> TableBuilder<'v, 'e> {
-    pub fn new(view: &'v mut ViewEmitter<'e>) -> Self {
+    pub fn new(view: &'v mut ViewEmitter<'e>, header: Header) -> Self {
         Self {
             view,
+            header_mode: header,
             header_row: None,
             header: BTreeMap::new(),
-            header_done: false,
+            // Without a header row there is nothing to wait for.
+            header_done: header == Header::Absent,
             current_row: None,
             column_formulas: BTreeMap::new(),
         }
@@ -192,17 +195,28 @@ impl<'v, 'e> TableBuilder<'v, 'e> {
         cell: CellValue,
         formula: Option<Formula>,
     ) {
-        let header_row = *self.header_row.get_or_insert(row);
+        // The first physical row seen: the header row, or data row 0.
+        let first = *self.header_row.get_or_insert(row);
         let physical = (row, column);
         let column = ColumnNumber(column + 1);
-        if row <= header_row {
-            if row == header_row {
-                self.header.insert(column.0, cell.header_text());
-            }
-            return;
-        }
-        self.finish_header();
-        let row = RowNumber(row - header_row - 1);
+        let row = match self.header_mode {
+            Header::FirstRow => {
+                if row <= first {
+                    if row == first {
+                        self.header.insert(column.0, cell.header_text());
+                    }
+                    return;
+                }
+                self.finish_header();
+                RowNumber(row - first - 1)
+            },
+            Header::Absent => {
+                if row < first {
+                    return;
+                }
+                RowNumber(row - first)
+            },
+        };
         if self.current_row != Some(row.0) {
             self.current_row = Some(row.0);
             self.view.row(row);

@@ -169,3 +169,33 @@ async fn parquet_values_keep_schema_types() {
         );
     }
 }
+
+#[tokio::test]
+async fn parquet_ignores_no_header() {
+    let input = tempfile::tempdir().unwrap();
+    write_fixture(&input.path().join("orders.parquet"));
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("raw.nq");
+    Triplify::new(
+        vec![input.path().to_owned()],
+        Output::file(out.clone(), false).unwrap(),
+    )
+    .with_header(triplify::emit::Header::Absent)
+    .run()
+    .await
+    .unwrap();
+    let ds: Dataset = RdfParser::from_format(RdfFormat::NQuads)
+        .for_slice(&std::fs::read(&out).unwrap())
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let rows = ds
+        .iter()
+        .filter(|q| q.predicate == rdf::TYPE && q.object == raw::ROW.into())
+        .count();
+    let labels = literals(&ds, rdfs::LABEL).len();
+    assert_eq!(
+        (rows, labels),
+        (3, 7),
+        "schema names stay labels, not a data row"
+    );
+}
