@@ -1,6 +1,6 @@
 [package]
 name = "triplify"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.92"
 description = "Triplify turns any tabular data dump (CSV, XLSX, Parquet, ...) into raw RDF using the EKGF Raw Data Ontology, with DCAT, PROV and git provenance, without any mapping"
