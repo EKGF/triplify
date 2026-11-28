@@ -1,11 +1,29 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-11-28)
 
 ### Features
 
-- `--no-header`: the first row of CSV/TSV files and worksheets is data and
-  columns get no labels. Parquet always uses its schema's names.
+- **`--no-header`** for CSV/TSV files and worksheets without a header row
+  (#16): the first row is data, rows count from 0, and columns are
+  identified by `raw:columnNumber` only, without labels. Parquet always
+  uses its schema's names.
+
+### Performance
+
+- **gzip output takes about half the CPU** (#18): `.gz` is compressed with
+  zlib-ng instead of zlib, still at level 6 and still standard gzip, and
+  the files come out about 4% smaller. On one vCPU, a 500k-row CSV to
+  `.nq.gz` takes 11.4 s instead of 19.3 s.
+
+### Distribution
+
+- **crates.io:** releases are published there through trusted publishing (#20).
+- **cargo-binstall:** each release carries `triplify-<target>.zip` for
+  Linux (x86-64, ARM64), macOS on Apple silicon and Windows (x86-64, ARM64),
+  so `cargo binstall triplify` downloads instead of compiling (#20, #22).
+- **Homebrew:** each release carries a `triplify.rb` formula for
+  `brew install ekgf/tap/triplify` (#23).
 
 ## 0.2.0 (2026-11-27)
 
